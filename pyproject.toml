@@ -23,6 +23,7 @@ server = [
     "torch>=2.0.0,<3.0.0",
     "torchaudio>=2.0.0,<3.0.0",
     "speechbrain>=1.0.0",
+    "webrtcvad>=2.0.10",
     "setuptools>=59.6.0,<81",
     "typer>=0.10.0",
     "uvicorn>=0.16.0",

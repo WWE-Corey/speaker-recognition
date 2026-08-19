@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import torchaudio
+import webrtcvad  # type: ignore[import-untyped]
 from numpy.typing import NDArray
 from speechbrain.inference.speaker import EncoderClassifier  # type: ignore[import-untyped]
 
@@ -25,6 +26,38 @@ _LOGGER = logging.getLogger(__name__)
 # SpeechBrain's ECAPA-TDNN checkpoint (speechbrain/spkrec-ecapa-voxceleb) expects
 # 16kHz mono input -- same rate AudioInput already defaults to.
 _TARGET_SAMPLE_RATE = 16000
+
+# WebRTC VAD requires 10/20/30ms frames at 8k/16k/32k/48kHz.
+_VAD_FRAME_MS = 30
+_VAD_FRAME_SAMPLES = _TARGET_SAMPLE_RATE * _VAD_FRAME_MS // 1000
+
+
+def _trim_silence(waveform: NDArray[np.float32]) -> NDArray[np.float32]:
+    """Trim leading/trailing non-speech using WebRTC VAD.
+
+    Live mic-captured utterances (satellite wake-word -> pause -> speech ->
+    VAD stop) carry real silence/background padding around the actual
+    speech that a clean enrollment recording doesn't. Unlike Resemblyzer's
+    own preprocess_wav (which did this internally via the same library),
+    ECAPA-TDNN embeddings have no built-in silence handling -- skipping
+    this step measurably diluted every recognize() score, genuine and
+    impostor alike, on real satellite audio (2026-08-19).
+    """
+    vad = webrtcvad.Vad(3)
+    pcm16 = (np.clip(waveform, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
+    n_frames = len(waveform) // _VAD_FRAME_SAMPLES
+    voiced = []
+    for i in range(n_frames):
+        start = i * _VAD_FRAME_SAMPLES * 2
+        frame = pcm16[start : start + _VAD_FRAME_SAMPLES * 2]
+        voiced.append(vad.is_speech(frame, _TARGET_SAMPLE_RATE))
+
+    if not any(voiced):
+        return waveform
+
+    first = voiced.index(True)
+    last = len(voiced) - 1 - voiced[::-1].index(True)
+    return waveform[first * _VAD_FRAME_SAMPLES : (last + 1) * _VAD_FRAME_SAMPLES]
 
 
 class SpeakerRecognizer:
@@ -95,7 +128,7 @@ class SpeakerRecognizer:
                 new_freq=_TARGET_SAMPLE_RATE,
             )
         result: NDArray[np.float32] = waveform.squeeze(0).numpy()
-        return result
+        return _trim_silence(result)
 
     def _embed(self, wav: NDArray[np.float32]) -> NDArray[np.float32]:
         """Compute an L2-normalized speaker embedding for a waveform.
