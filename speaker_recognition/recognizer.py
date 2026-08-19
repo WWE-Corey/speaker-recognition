@@ -128,7 +128,16 @@ class SpeakerRecognizer:
                 new_freq=_TARGET_SAMPLE_RATE,
             )
         result: NDArray[np.float32] = waveform.squeeze(0).numpy()
-        return _trim_silence(result)
+        trimmed = _trim_silence(result)
+        _LOGGER.debug(
+            f"process_audio_input: reported_sample_rate={audio_input.sample_rate} "
+            f"raw_samples={audio_array_int16.size} "
+            f"pre_trim_duration_s={len(result) / _TARGET_SAMPLE_RATE:.2f} "
+            f"post_trim_duration_s={len(trimmed) / _TARGET_SAMPLE_RATE:.2f} "
+            f"pre_trim_rms={float(np.sqrt(np.mean(result.astype(np.float64) ** 2))):.4f} "
+            f"post_trim_rms={float(np.sqrt(np.mean(trimmed.astype(np.float64) ** 2))) if len(trimmed) else float('nan'):.4f}"
+        )
+        return trimmed
 
     def _embed(self, wav: NDArray[np.float32]) -> NDArray[np.float32]:
         """Compute an L2-normalized speaker embedding for a waveform.
