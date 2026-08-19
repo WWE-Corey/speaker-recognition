@@ -196,34 +196,52 @@ class SpeakerRecognizer:
         self._reference_embeddings = {}
         _LOGGER.info(f"Training with {len(request.voice_samples)} voice samples")
 
+        samples_by_user: dict[str, list[AudioInput]] = {}
         for sample in request.voice_samples:
-            user_id = sample.user
-            audio_input = sample.audio
+            samples_by_user.setdefault(sample.user, []).append(sample.audio)
 
-            _LOGGER.info(f"Processing voice sample for user: {user_id}")
+        for user_id, audio_inputs in samples_by_user.items():
+            _LOGGER.info(
+                f"Processing {len(audio_inputs)} voice sample(s) for user: {user_id}"
+            )
 
             try:
-                embedding: NDArray[np.float32]
+                # Multiple samples for the same user are embedded individually
+                # then averaged (+ re-normalized) into one reference embedding --
+                # a more robust "centroid" than any single recording, standard
+                # practice for speaker enrollment. Always recomputed from the
+                # submitted audio rather than read from a stale cache: the old
+                # "skip recompute if a cached .npy exists" behavior silently
+                # ignored resubmitted audio (a real bug hit and fixed by hand
+                # during the 2026-08-19 rebuild) -- recomputing is cheap enough
+                # on CPU (a few hundred ms per sample) that there's no reason
+                # to keep that footgun around.
+                embeddings = [
+                    self._embed(self.process_audio_input(audio_input))
+                    for audio_input in audio_inputs
+                ]
+                averaged = np.mean(embeddings, axis=0)
+                norm = np.linalg.norm(averaged)
+                if norm > 0:
+                    averaged = averaged / norm
+                embedding: NDArray[np.float32] = averaged.astype(np.float32)
+
                 embedding_path = self._embeddings_directory / f"{user_id}_embedding.npy"
-
-                if embedding_path.exists():
-                    _LOGGER.debug(f"Loading cached embedding from {embedding_path}")
-                    loaded_data = np.load(embedding_path, allow_pickle=False)
-                    embedding = np.asarray(loaded_data)
-                else:
-                    _LOGGER.debug("Creating embedding from audio input")
-                    wav = self.process_audio_input(audio_input)
-                    embedding = self._embed(wav)
-
-                    np.save(embedding_path, embedding)
-                    _LOGGER.debug(f"Embedding cached to {embedding_path}")
+                np.save(embedding_path, embedding)
+                _LOGGER.debug(
+                    f"Embedding ({len(audio_inputs)} sample(s) averaged) "
+                    f"cached to {embedding_path}"
+                )
 
                 self._reference_embeddings[user_id] = embedding
-                _LOGGER.info(f"Successfully trained voice sample for user: {user_id}")
+                _LOGGER.info(
+                    f"Successfully trained user: {user_id} "
+                    f"from {len(audio_inputs)} sample(s)"
+                )
 
             except Exception as error:
                 _LOGGER.error(
-                    f"Error processing voice sample for user {user_id}: {error}"
+                    f"Error processing voice sample(s) for user {user_id}: {error}"
                 )
                 continue
 
