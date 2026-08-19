@@ -36,9 +36,14 @@ class SpeakerRecognizer:
         Args:
             config: Application configuration
         """
+        # Deliberately not derived from config.embeddings_directory: the CLI
+        # (__main__.py) only applies its --embeddings-dir override to the
+        # already-constructed `recognizer` singleton *after* import, so at
+        # __init__ time config.embeddings_directory would still be the
+        # DEFAULT_EMBEDDINGS_DIR placeholder. Let SpeechBrain use its normal
+        # HF Hub cache instead (respects the HF_HOME env var if set).
         self._encoder = EncoderClassifier.from_hparams(
             source="speechbrain/spkrec-ecapa-voxceleb",
-            savedir=str(Path(config.embeddings_directory) / ".speechbrain_model"),
             run_opts={"device": "cpu"},
         )
         self._reference_embeddings: dict[str, NDArray[np.float32]] = {}
