@@ -2,6 +2,9 @@
 
 import base64
 import logging
+import os
+import time
+import wave
 from pathlib import Path
 
 import numpy as np
@@ -22,6 +25,26 @@ from speaker_recognition.models import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# Diagnostic-only: when set, every incoming audio_input (raw, pre-trim/resample)
+# is saved as a real WAV file, so a genuine live-satellite sample can be
+# captured for re-enrollment instead of relying on a differently-recorded
+# enrollment file. Off unless CAPTURE_AUDIO_DIR is explicitly set.
+_CAPTURE_DIR = os.environ.get("CAPTURE_AUDIO_DIR")
+
+
+def _maybe_capture(audio_bytes: bytes, sample_rate: int) -> None:
+    if not _CAPTURE_DIR:
+        return
+    capture_dir = Path(_CAPTURE_DIR)
+    capture_dir.mkdir(parents=True, exist_ok=True)
+    path = capture_dir / f"capture_{int(time.time() * 1000)}.wav"
+    with wave.open(str(path), "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(sample_rate)
+        wav_file.writeframes(audio_bytes)
+    _LOGGER.info(f"Captured raw audio to {path}")
 
 # SpeechBrain's ECAPA-TDNN checkpoint (speechbrain/spkrec-ecapa-voxceleb) expects
 # 16kHz mono input -- same rate AudioInput already defaults to.
@@ -118,6 +141,8 @@ class SpeakerRecognizer:
 
         if audio_array_int16.size == 0:
             raise ValueError("Empty audio data")
+
+        _maybe_capture(audio_bytes, audio_input.sample_rate)
 
         audio_array_float32 = audio_array_int16.astype(np.float32) / 32768.0
         waveform = torch.from_numpy(audio_array_float32).unsqueeze(0)
