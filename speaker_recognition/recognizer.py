@@ -5,8 +5,10 @@ import logging
 from pathlib import Path
 
 import numpy as np
+import torch
+import torchaudio
 from numpy.typing import NDArray
-from resemblyzer import VoiceEncoder, preprocess_wav  # type: ignore[import-untyped]
+from speechbrain.inference.speaker import EncoderClassifier  # type: ignore[import-untyped]
 
 from speaker_recognition.models import (
     AudioInput,
@@ -20,6 +22,10 @@ from speaker_recognition.models import (
 
 _LOGGER = logging.getLogger(__name__)
 
+# SpeechBrain's ECAPA-TDNN checkpoint (speechbrain/spkrec-ecapa-voxceleb) expects
+# 16kHz mono input -- same rate AudioInput already defaults to.
+_TARGET_SAMPLE_RATE = 16000
+
 
 class SpeakerRecognizer:
     """Handle speaker recognition operations."""
@@ -30,7 +36,11 @@ class SpeakerRecognizer:
         Args:
             config: Application configuration
         """
-        self._encoder: VoiceEncoder = VoiceEncoder()
+        self._encoder = EncoderClassifier.from_hparams(
+            source="speechbrain/spkrec-ecapa-voxceleb",
+            savedir=str(Path(config.embeddings_directory) / ".speechbrain_model"),
+            run_opts={"device": "cpu"},
+        )
         self._reference_embeddings: dict[str, NDArray[np.float32]] = {}
         self._is_trained = False
         self._config = config
@@ -72,10 +82,30 @@ class SpeakerRecognizer:
             raise ValueError("Empty audio data")
 
         audio_array_float32 = audio_array_int16.astype(np.float32) / 32768.0
-        result: NDArray[np.float32] = preprocess_wav(
-            audio_array_float32, source_sr=audio_input.sample_rate
-        )
+        waveform = torch.from_numpy(audio_array_float32).unsqueeze(0)
+        if audio_input.sample_rate != _TARGET_SAMPLE_RATE:
+            waveform = torchaudio.functional.resample(
+                waveform,
+                orig_freq=audio_input.sample_rate,
+                new_freq=_TARGET_SAMPLE_RATE,
+            )
+        result: NDArray[np.float32] = waveform.squeeze(0).numpy()
         return result
+
+    def _embed(self, wav: NDArray[np.float32]) -> NDArray[np.float32]:
+        """Compute an L2-normalized speaker embedding for a waveform.
+
+        Normalized so the existing dot-product comparison in `recognize()`
+        (carried over from the Resemblyzer-based original, which always
+        returned pre-normalized vectors) still computes cosine similarity.
+        """
+        waveform = torch.from_numpy(wav).unsqueeze(0)
+        with torch.no_grad():
+            embedding = self._encoder.encode_batch(waveform).squeeze().numpy()
+        norm = np.linalg.norm(embedding)
+        if norm > 0:
+            embedding = embedding / norm
+        return embedding.astype(np.float32)
 
     def train(self, request: TrainingRequest) -> TrainingResult:
         """Train the speaker recognition model.
@@ -111,7 +141,7 @@ class SpeakerRecognizer:
                 else:
                     _LOGGER.debug("Creating embedding from audio input")
                     wav = self.process_audio_input(audio_input)
-                    embedding = np.asarray(self._encoder.embed_utterance(wav))
+                    embedding = self._embed(wav)
 
                     np.save(embedding_path, embedding)
                     _LOGGER.debug(f"Embedding cached to {embedding_path}")
@@ -152,7 +182,7 @@ class SpeakerRecognizer:
             raise RuntimeError("Model not trained")
 
         wav = self.process_audio_input(request.audio)
-        chunk_embedding = self._encoder.embed_utterance(wav)
+        chunk_embedding = self._embed(wav)
 
         scores: dict[str, float] = {}
         for user_id, reference_embedding in self._reference_embeddings.items():
